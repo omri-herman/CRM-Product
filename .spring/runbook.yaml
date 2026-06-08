@@ -41,5 +41,5 @@ steps:
     background: true
     ready_when:
       type: http
-      url: "http://localhost:3000/healthz"
+      url: "http://localhost:3001/"
       timeout: "300s"
