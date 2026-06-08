@@ -1,0 +1,45 @@
+spring: "1.0"
+
+name: Project Setup
+description: "Local dev setup for Twenty CRM (Nx monorepo) on macOS. Provisions Postgres 16 and Redis via Homebrew, pins Node 24.5.0 via fnm, seeds a demo workspace, then starts the backend (http://localhost:3000), frontend (http://localhost:3001) and worker. Postgres is configured on port 5433 to avoid colliding with any existing Postgres already running on the default 5432."
+
+prerequisites:
+  - name: Homebrew
+    check: /opt/homebrew/bin/brew --version
+    required: true
+  - name: fnm + Node.js 24.5.0
+    check: /opt/homebrew/bin/fnm list | grep -q v24.5.0
+    required: true
+  - name: Yarn (via Corepack)
+    check: "bash -c 'eval \"$(/opt/homebrew/bin/fnm env)\"; fnm use 24.5.0 >/dev/null 2>&1; yarn --version'"
+    required: true
+  - name: PostgreSQL 16
+    check: /opt/homebrew/bin/brew list postgresql@16
+    required: true
+  - name: Redis
+    check: /opt/homebrew/bin/brew list redis
+    required: true
+
+steps:
+  - name: Free app ports if in use
+    run: npx kill-port 3000 3001 || true
+    optional: true
+  - name: Configure PostgreSQL 16 to listen on port 5433
+    run: "CONF=/opt/homebrew/var/postgresql@16/postgresql.conf\ngrep -qE '^port = 5433' \"$CONF\" || echo 'port = 5433' >> \"$CONF\"\n"
+  - name: Start PostgreSQL 16 and Redis
+    run: "/opt/homebrew/bin/brew services restart postgresql@16\n/opt/homebrew/bin/brew services start redis\n# Wait for Postgres to accept connections on 5433\nfor i in $(seq 1 30); do\n  /opt/homebrew/opt/postgresql@16/bin/pg_isready -h localhost -p 5433 -q && break\n  sleep 1\ndone\n/opt/homebrew/opt/postgresql@16/bin/pg_isready -h localhost -p 5433\n"
+  - name: Create postgres role and databases
+    run: "PSQL=/opt/homebrew/opt/postgresql@16/bin/psql\nADMIN=\"$(whoami)\"\n$PSQL -h localhost -p 5433 -U \"$ADMIN\" -d postgres -tc \"SELECT 1 FROM pg_roles WHERE rolname='postgres'\" | grep -q 1 \\\n  || $PSQL -h localhost -p 5433 -U \"$ADMIN\" -d postgres -c \"CREATE ROLE postgres WITH LOGIN SUPERUSER PASSWORD 'postgres';\"\n$PSQL -h localhost -p 5433 -U \"$ADMIN\" -d postgres -tc \"SELECT 1 FROM pg_database WHERE datname='default'\" | grep -q 1 \\\n  || $PSQL -h localhost -p 5433 -U \"$ADMIN\" -d postgres -c 'CREATE DATABASE \"default\" OWNER postgres;'\n$PSQL -h localhost -p 5433 -U \"$ADMIN\" -d postgres -tc \"SELECT 1 FROM pg_database WHERE datname='test'\" | grep -q 1 \\\n  || $PSQL -h localhost -p 5433 -U \"$ADMIN\" -d postgres -c 'CREATE DATABASE \"test\" OWNER postgres;'\n"
+  - name: Create and configure .env files
+    run: "cp -n packages/twenty-server/.env.example packages/twenty-server/.env || true\ncp -n packages/twenty-front/.env.example  packages/twenty-front/.env  || true\n# Point the server at Postgres on 5433\nsed -i '' 's#localhost:5432/default#localhost:5433/default#' packages/twenty-server/.env\n# Replace the placeholder APP_SECRET with a real random value (only if still the placeholder)\nif grep -q 'APP_SECRET=replace_me_with_a_random_string' packages/twenty-server/.env; then\n  sed -i '' \"s#APP_SECRET=replace_me_with_a_random_string#APP_SECRET=$(openssl rand -base64 32)#\" packages/twenty-server/.env\nfi\n"
+  - name: Install dependencies
+    run: "export PATH=\"/opt/homebrew/bin:$PATH\"\neval \"$(fnm env)\"\nfnm use 24.5.0\nyarn install\n"
+  - name: "Build and seed database (demo \"Apple\" workspace)"
+    run: "export PATH=\"/opt/homebrew/bin:$PATH\"\neval \"$(fnm env)\"\nfnm use 24.5.0\nnpx nx database:reset twenty-server\n"
+  - name: Start development servers (frontend + backend + worker)
+    run: "export PATH=\"/opt/homebrew/bin:$PATH\"\neval \"$(fnm env)\"\nfnm use 24.5.0\nyarn start\n"
+    background: true
+    ready_when:
+      type: http
+      url: "http://localhost:3000/healthz"
+      timeout: "300s"
